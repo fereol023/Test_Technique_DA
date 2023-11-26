@@ -3,19 +3,22 @@ import time
 import warnings
 warnings.filterwarnings('ignore')
 
-from joblib import load, dump
 import numpy as np
 import pandas as pd
+import seaborn as sns
+import matplotlib.pyplot as plt
+
+import shap
+
 from pprint import pprint
 from itertools import product
-from sklearn.ensemble import RandomForestRegressor
-from scipy.stats import shapiro, pearsonr
+from joblib import load, dump
 
-from sklearn.model_selection import train_test_split, RandomizedSearchCV, GridSearchCV
-from sklearn.pipeline import make_pipeline
-from sklearn.preprocessing import LabelEncoder, StandardScaler
-from sklearn.ensemble import RandomForestRegressor
+from scipy.stats import shapiro, pearsonr
 from sklearn.metrics import mean_squared_error
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.preprocessing import LabelEncoder, StandardScaler
+from sklearn.model_selection import train_test_split, RandomizedSearchCV, GridSearchCV
 
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.preprocessing import OneHotEncoder, LabelEncoder
@@ -89,16 +92,23 @@ class QuantitativeEncoder(BaseEstimator, TransformerMixin):
     def __init__(self, columns = None):
         super().__init__()
         self.columns = columns
+        if os.path.exists('./model/artifacts/fitted_standardScaler.joblib'):
+            self.standardencoder = load('./model/artifacts/fitted_standardScaler.joblib')
+        else:
+            self.standardencoder = StandardScaler()
 
     def fit(self, X, y = None):
         if self.columns is not None:
             self.X = X[self.columns]
+
+        self.standardencoder.fit(self.X)
+        dump(self.standardencoder, './model/artifacts/fitted_standardScaler.joblib')
         return self
     
     def transform(self, X):
         if self.columns is not None:
             X = X[self.columns]
-        return X
+        return pd.DataFrame(self.standardencoder.transform(X), columns=self.columns)
 
 class QualitativeEncoder(BaseEstimator, TransformerMixin):
     """
@@ -127,8 +137,8 @@ class QualitativeEncoder(BaseEstimator, TransformerMixin):
         return pd.DataFrame(self.labencode.transform(X), columns = self.columns)
 
 class ML_pipeline:
-    def __init__(self, model=None):
-        self.model = model
+    def __init__(self):
+        #self.model = model
         quant = [
             'Age',
             'Seniority',
@@ -146,16 +156,18 @@ class ML_pipeline:
             ]
         )
 
-    def build_pipeline(self):
+    def build_pipeline(self, model=None):
         """
         Pour construire le pipeline.
         """
-        ML_pipeline_instance = Pipeline(
-            [
-                ('FeatureEngineering', self.feature_pipeline),
-                ('Model', self.model)
-            ]
-        )
+        if model is None: # pour pouvoir réutiliser le pipeline en mode preprocessing seulement
+            ML_pipeline_instance = Pipeline([('FeatureEngineering', self.feature_pipeline)])
+        else :
+            self.model = model
+            ML_pipeline_instance = Pipeline([
+                    ('FeatureEngineering', self.feature_pipeline),
+                    ('Model', self.model)
+                ])
         return ML_pipeline_instance  
 
 
@@ -197,18 +209,48 @@ def main(p_data, mode='save_cv'):
                                 cv = 4, 
                                 n_jobs = 10)
 
-        ML_pipeline(model=rfcv).build_pipeline().fit(x_features, y_target)
+        mlp=ML_pipeline().build_pipeline(model=rfcv).fit(x_features, y_target)
         dump(rfcv.best_estimator_, './model/outputs/rf_best_model.joblib') 
+
+        # feature importance dans la phase d'apprentissage
+        feats = {}
+        for colname,importance in list(zip(x_features_names,rfcv.best_estimator_.feature_importances_)):
+            feats[colname] = importance
+
+        mdi_importances = pd.DataFrame.from_dict(feats, orient='index').rename(columns={0: 'Gini-importance'})
+        mdi_importances.sort_values(by='Gini-importance').plot(kind='bar', rot=30, figsize=(15,8))
+        plt.savefig('./images/002.png')
+        plt.close()                  
+
+        # shap sur le train set
+        # Faut faire repasser les features par le pipeline de preprocessing car les strings bruts ne sont pas traités par shap
+        X = ML_pipeline().build_pipeline(model=None).fit_transform(x_features) 
+        explainer = shap.Explainer(rfcv.best_estimator_)
+        shap_values = explainer(X)
+        #print(shap_values)
+        
+        # explication de l'output de l'observation 1 du train set first prediction's explanation
+        shap.plots.waterfall(shap_values[0])
+        # visualize the first prediction's explanation with a force plot
+        shap.plots.force(shap_values[0])
+        # summarize the effects of all the features (POV vsriables + observations)
+        shap.plots.beeswarm(shap_values) 
+        # visaulize MAE pour ttes les variables (POV variables)
+        shap.plots.bar(shap_values)
+
+        #plt.savefig('./images/003.png')
+
         print(f'Model saved with params : {rfcv.best_params_}')
 
     elif mode == 'evaluation':
         best_rfcv = load('./model/outputs/rf_best_model.joblib')
-        y_preds = ML_pipeline(model=best_rfcv).build_pipeline().predict(x_features)
+        y_preds = ML_pipeline().build_pipeline(model=best_rfcv).predict(x_features)
         rmse = round(mean_squared_error(y_target, y_preds, squared=False), 3)
         print(f'Evaluation mean error : {rmse}')
 
     else:
         print("Mode invalide.")
+
 
 if __name__=='__main__':
 
@@ -218,12 +260,16 @@ if __name__=='__main__':
     p3_path = "./datasets/period_3.csv"
     #Explore(p0_path).globalDescription()
     #Explore(p0_path).globalCheckNull()
-    Explore(p0_path).distroTopCategory()
-    Explore(p1_path).distroTopCategory()
-    Explore(p2_path).distroTopCategory()
-    Explore(p3_path).distroTopCategory()
+    #Explore(p0_path).distroTopCategory()
+    #Explore(p1_path).distroTopCategory()
+    #Explore(p2_path).distroTopCategory()
+    #Explore(p3_path).distroTopCategory()
 
-    #Explore(p0_path).normality()
+    Explore(p0_path).normality()
+    #Explore(p1_path).normality()
+    #Explore(p2_path).normality()
+    #Explore(p3_path).normality()
+
     #Explore(p0_path).correlation()
 
     p0 = Explore(p0_path).df
@@ -243,5 +289,4 @@ if __name__=='__main__':
     # Le CA est fortement corrélé avec le tps passé sur le site. 
     # Ttes les variables quantitatives sont issues de distributions normales y.c. la target.
     # 1/4 des TopCateg sont des Beauty & Personal Care et 1/4 des Clothings shoes et jewelry. 
-
-
+    
